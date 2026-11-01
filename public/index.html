@@ -23,140 +23,31 @@ h1,h2,.brand{font-family:"Quicksand","Nunito",system-ui,sans-serif}
 <div id="app"></div>
 
 <script type="module">
-/* ============ 1. MODO DEMO: simula Firestore con localStorage (sin Firebase) ============ */
-class TS{constructor(ms){this.ms=ms} toDate(){return new Date(this.ms)} valueOf(){return this.ms}
-  static now(){return new TS(Date.now())} static fromDate(d){return new TS(+d)}}
-const Timestamp=TS, serverTimestamp=()=>({__sv:1});
-const enc=v=>{ if(v&&v.__sv) return {__ts:Date.now()}; if(v instanceof TS) return {__ts:v.ms};
-  if(v&&typeof v==='object') return Object.fromEntries(Object.entries(v).map(([k,x])=>[k,enc(x)])); return v; };
-const rev=v=>{ if(v&&typeof v==='object'){ if('__ts' in v) return new TS(v.__ts); for(const k in v) v[k]=rev(v[k]); } return v; };
-const rd=x=>rev(JSON.parse(JSON.stringify(x)));
+/* ============ 1. FIREBASE / FIRESTORE REAL (datos compartidos entre navegadores y dispositivos) ============ */
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
+import { initializeFirestore, collection, doc, getDoc, getDocs, addDoc, setDoc, updateDoc, deleteDoc,
+         onSnapshot, query, where, Timestamp, serverTimestamp, writeBatch }
+  from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyBMoomlaZDxUrQGDH8gKKXTaYAGAY5-1TI",
+  authDomain: "eleiter-faf73.firebaseapp.com",
+  projectId: "eleiter-faf73",
+  storageBucket: "eleiter-faf73.firebasestorage.app",
+  messagingSenderId: "1092327966624",
+  appId: "1:1092327966624:web:80a6545d86f06548c386c5",
+  measurementId: "G-GWJL3NK808"
+};
+const fbApp = initializeApp(firebaseConfig);
+const db = initializeFirestore(fbApp, {experimentalAutoDetectLongPolling: true});
+
+/* El código de la página resta y compara fechas con + y -; hacemos que un Timestamp valga sus milisegundos. */
+Timestamp.prototype.valueOf = function () { return this.toMillis(); };
+
 /* Catálogo de estados del chofer (7 etapas). askLoad: pide el % de volumen cargado · askNotes: pide novedades */
 const STATUS_DEFAULTS=[['Salida de planta',0,0],['Llegada a bodega del proveedor',0,0],['Cargando material',0,0],['Salida de bodega del proveedor',1,0],
   ['Llegada a planta',0,0],['Descargando material',0,0],['Camión descargado',0,1]];
 const NSTEP=STATUS_DEFAULTS.length;
-const KEY='demo_logistica_v7', subs=new Set();
-function demo(){
-  const d={users:{},trucks:{},statuses:{},trips:{},routes:{},requests:{}}; let i=0;
-  const put=(c,o)=>{const k='d'+(i++); d[c][k]=o; return k;};
-  /* El Excel de báscula no trae ciudad: para la demo se asigna una ciudad estable por proveedor (se reemplaza al importar datos reales). */
-  const CITIES=['Guayaquil','Quevedo','Machala','Cuenca','El Empalme','Naranjito','Santa Elena','Milagro','Daule','Babahoyo','Durán','Manta'];
-  const cityOf=s=>CITIES[[...String(s)].reduce((a,c)=>(a*31+c.charCodeAt(0))>>>0,7)%CITIES.length];
-  /* Datos de prueba de la hoja de programación: ayudantes, tulas y kilos a cargar (estables por ruta). Se reemplazan al importar el Excel. */
-  const POOLA=['Mendoza Carlos','Maquilon Luis','Burgos Gabriel','Silva Alfredo','Malaga Rene','Torres Marcos','Torres Oscar','Santana Luis','Criollo Gustavo','Merchan Anthony','Lozano Elkin'];
-  const hh=s=>[...String(s)].reduce((a,c)=>(a*31+c.charCodeAt(0))>>>0,11);
-  const putR=o=>{ const h=hh(o.route), n=POOLA.length, i1=h%n, c=CAP[o.plate]||5;
-    return put('routes',{...o,city:o.city??cityOf(o.supplier),ayud1:POOLA[i1],...(h%3?{ayud2:POOLA[(i1+1+((h>>3)%(n-1)))%n]}:{}),
-      tulas:h%4?h%46:0,cargar:o.cargar??Math.round(c*1000*(.4+(h%6)/10)/100)*100}); };
-  const CAP={'GBP-2969':20,'GBP-9993':10,'NBA-1190':8,'KBA-1226':8,'GBP-7833':5,'GQF-0713':5,'GSJ-4626':5,'GRP-0009':5,'GSN-2131':5,'GBQ-1014':2.5,'GSW-7452':2.5};   // capacidad en TM, según el calendario semanal
-  const t0=new Date(); t0.setHours(0,0,0,0); const day=t0.getTime(), h=36e5;
-  put('users',{username:'admin',pin:'1234',role:'admin'}); put('users',{username:'chofer1',pin:'1111',role:'chofer'}); put('users',{username:'chofer2',pin:'2222',role:'chofer'});
-  [...new Set(HIST.flatMap(x=>[x.placaSB,x.placa]))].sort().forEach(p=>put('trucks',CAP[p]?{plate:p,cap:CAP[p]}:{plate:p}));
-  STATUS_DEFAULTS.forEach(([n,a,o],k)=>put('statuses',{name:n,order:k+1,askLoad:!!a,askNotes:!!o}));
-  /* Rutas y viajes del dashboard: salen del Excel real (HIST). Lo que normalmente marca el chofer en la app
-     (las 7 etapas, el % de carga y las novedades) se SIMULA con horas coherentes
-     con la salida de planta y la báscula del Excel; esos viajes llevan simulado:true. */
-  const cap=s=>String(s??'').toLowerCase().replace(/(^|\s)(\S)/g,(m,a,b)=>a+b.toUpperCase()).replace(/S\.a\./g,'S.A.');
-  const rng=a=>()=>{a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296};   // determinista por ruta
-  HIST.slice().sort((x,y)=>Date.parse(x.fechaAsignada)-Date.parse(y.fechaAsignada)).forEach(x=>{
-    const R=rng(x.ruta), r=(lo,hi)=>lo+(hi-lo)*R(), M=6e4;
-    const A=Date.parse(x.fechaAsignada), SB=Date.parse(x.fechaSB), S0=x.fechaSalida?Date.parse(x.fechaSalida):null;
-    const S=S0??A+Math.round(r(10,40))*M;                              // sin salida en el sistema: se inventa una tras la hora asignada
-    const driver=cap(x.choferSB), supplier=cap(x.proveedor), plate=x.placaSB;
-    const rid=putR({route:String(x.ruta),plate,driver,supplier,departure:{__ts:A},cargar:x.pesoAsesor>0?x.pesoAsesor:undefined});
-    const U=Math.max(SB-Math.round(r(5,20))*M-S,(SB-S)*.6);             // salida de planta → llegada a planta (antes del pesaje)
-    const carga=Math.min(r(45,180)*M,U*.35), rest=U-carga, ida=rest*r(.35,.5), trans=rest-ida;
-    // 7 etapas: salida de planta · llegada proveedor · cargando · salida proveedor · llegada a planta · descargando · descargado
-    const e1=S, e2=S+ida, e3=e2+Math.min(r(3,12)*M,carga*.3), e4=e2+carga, e5=S+U, e6=SB+r(10,30)*M, e7=e6+r(20,60)*M;
-    const cum=x.pesoAsesor>0?x.pesoSb/x.pesoAsesor:1;
-    const load=x.pesoSb<=0?0:Math.min(100,Math.max(15,Math.round((Math.min(cum,1)*85+r(0,15))/5)*5));   // % de carga acorde al peso de báscula
-    const nov=r(0,1)<.2?'Demora en la descarga por fila de camiones':'Sin novedades';
-    const ts={}; [e1,e2,e3,e4,e5,e6,e7].forEach((v,i)=>ts['s'+(i+1)]={__ts:Math.round(v)});
-    put('trips',{routeId:rid,route:String(x.ruta),plate,driver,supplier,username:driver,departure:{__ts:S0??A},currentStep:NSTEP,status:'done',
-      createdAt:{__ts:Math.min(A,S)},finishedAt:{__ts:Math.round(e7)},loadPct:load,novedades:nov,ts,simulado:true});
-  });
-  /* Rutas de hoy para probar el flujo del chofer y las alertas de FLOTA ESTADO. Sus horas son relativas al momento en que se carga la demo:
-     GBQ-1014 tiene la ruta 5653 en curso y la 5650 sale en ~20 min (alerta naranja); GRP-0009 tiene la 5654 en curso y la 5651 debió salir hace 15 min (alerta roja). */
-  const n5=Math.floor(Date.now()/3e5)*3e5, MIN=6e4;
-  putR({route:'5650',plate:'GBQ-1014',driver:'Cesar Bravo',supplier:'Pronaca',departure:{__ts:n5+20*MIN},simulado:true});
-  putR({route:'5651',plate:'GRP-0009',driver:'Cesar Intriago',supplier:'Enlit',departure:{__ts:n5-15*MIN},simulado:true});
-  putR({route:'5652',plate:'GBP-9993',driver:'Xavier Heredia',supplier:'Heineken Ecuador S.A.',departure:{__ts:n5+180*MIN},simulado:true});
-  putR({route:'5656',plate:'GSN-2131',driver:'Mairo Triviño',supplier:'Vergara Pico Jefferson Joel',departure:{__ts:n5+240*MIN},simulado:true});   // camión libre: sirve para probar el inicio de ruta del chofer
-  const enCurso=(route,plate,driver,supplier,desde,step,load)=>{ const dep=n5-desde*MIN, ts={}; [5,35,40,95,125,140,160].slice(0,step).forEach((m,i)=>ts['s'+(i+1)]={__ts:dep+m*MIN});
-    const rid=putR({route,plate,driver,supplier,departure:{__ts:dep},simulado:true});
-    put('trips',{routeId:rid,route,plate,driver,supplier,username:driver,departure:{__ts:dep},currentStep:step,status:'active',createdAt:{__ts:dep},loadPct:load,ts,simulado:true}); };
-  enCurso('5653','GBQ-1014','Cesar Bravo','Heineken Ecuador S.A.',150,5,90);   // llegó a planta
-  enCurso('5654','GRP-0009','Cesar Intriago','Michelena Chavez Gary',180,4,75);  // salió del proveedor
-  enCurso('5655','GBP-9993','Xavier Heredia','Transarc S.A.',90,3,null);        // cargando material; la próxima (5652) sale en 3 h: sin alerta → marco verde
-  /* Calendario semanal: rutas de la semana actual y la siguiente (relativas a hoy) para ver celdas con varias rutas y los estados
-     CANCELADO / REAGENDADO (campo schedStatus en la ruta). Usan placas sin viaje en curso para no alterar las alertas de FLOTA ESTADO. */
-  const wk=day-((new Date(day).getDay()+6)%7)*864e5, DAY=864e5;
-  [['5660','KBA-1226','Cesar Holguin','Agustín Torres','Machala',2,7,'reagendado'],
-   ['5661','GBP-7833','Luis Enrique Veliz Calle','Manuel Herrera','El Empalme',3,9,'cancelado'],
-   ['5662','GQF-0713','Omar Veliz','Miguel Freire','Naranjito',1,10,'reagendado'],
-   ['5663','GBP-2969','Cesar Holguin','Mabe Ecuador','Cuenca',9,7,''],
-   ['5664','GBP-2969','Cesar Holguin','Heineken Ecuador S.A.','Guayaquil',9,14,''],
-   ['5665','GSN-2131','Mairo Triviño','Cristóbal Delgado','Quevedo',10,8,''],
-   ['5666','KBA-1226','Cesar Holguin','José Sánchez','Cuenca',8,6.5,'cancelado'],
-   ['5667','GSJ-4626','Luis Veliz','Guachichulca','Cuenca',11,8,''],
-   ['5668','GBP-7833','Luis Enrique Veliz Calle','Recicladora Reciferro','Santa Elena',8,9,'']]
-    .forEach(([route,plate,driver,supplier,city,dOff,hr,st])=>putR({route,plate,driver,supplier,city,departure:{__ts:wk+dOff*DAY+hr*h},schedStatus:st,simulado:true}));
-  /* Solicitudes pendientes por asignar: aún no tienen número de ruta */
-  [['Recicladora Reciferro','Santa Elena',5,-1],['Cristóbal Delgado','Quevedo',5,1],['Guachichulca','Cuenca',10,2],
-   ['Miguel Freire','Naranjito',8,3],['Mabe Ecuador','Guayaquil',20,5],['José Sánchez','Cuenca',5,6]]
-    .forEach(([supplier,city,tons,dOff])=>put('requests',{supplier,city,tons,requestedFor:{__ts:day+dOff*DAY+8*h}}));
-  return d;
-}
-/* Histórico real (semana 26–29 oct 2026) exportado de la báscula y del sistema de programación. Fechas en hora de Ecuador (-05:00). */
-const HIST=[
-{"ruta":5613,"numsb":"SBG00000979","proveedor":"PINCAY VILLAMAR JHONATAN XAVIER","fechaSB":"2026-10-27T08:35:55-05:00","placaSB":"GBP-7833","choferSB":"LUIS ENRIQUE VELIZ CALLE","placa":"KBA-1226","chofer":"HOLGUIN ZAMBRANO CESAR ARMANDO","pesoSb":4220,"pesoAsesor":8000,"fechaSalida":"2026-10-26T14:25:03-05:00","fechaGeneraSolic":"2026-10-22T15:10:28-05:00","fechaSolicitada":"2026-10-26T08:00:00-05:00","fechaGeneraRuta":"2026-10-23T12:42:22-05:00","fechaAsignada":"2026-10-26T08:00:00-05:00"},
-{"ruta":5617,"numsb":"SBG00005494","proveedor":"MOYANO ZAMBRANO SILVANIA LOURDES","fechaSB":"2026-10-27T08:15:56-05:00","placaSB":"GSN-2131","choferSB":"MAIRO TRIVIÑO","placa":"GSN-2131","chofer":"TRIVIÑO MONTECE MAIRO AGUSTIN","pesoSb":3730,"pesoAsesor":6000,"fechaSalida":"2026-10-26T05:34:56-05:00","fechaGeneraSolic":"2026-10-23T07:54:37-05:00","fechaSolicitada":"2026-10-26T08:00:00-05:00","fechaGeneraRuta":"2026-10-23T14:20:25-05:00","fechaAsignada":"2026-10-26T08:00:00-05:00"},
-{"ruta":5611,"numsb":"SBG00005493","proveedor":"VARGAS ONATE JOSE EUCLIDES","fechaSB":"2026-10-27T08:10:38-05:00","placaSB":"NBA-1190","choferSB":"MARCOS LOPEZ","placa":"NBA-1190","chofer":"LOPEZ VALENCIA MARCOS ANTONIO  ","pesoSb":4610,"pesoAsesor":3800,"fechaSalida":"2026-10-26T05:54:18-05:00","fechaGeneraSolic":"2026-10-22T15:21:35-05:00","fechaSolicitada":"2026-10-26T08:00:00-05:00","fechaGeneraRuta":"2026-10-23T12:37:36-05:00","fechaAsignada":"2026-10-26T08:00:00-05:00"},
-{"ruta":5593,"numsb":"SBC00001327","proveedor":"ENLIT","fechaSB":"2026-10-26T13:30:19-05:00","placaSB":"GRP-0009","choferSB":"CESAR INTRIAGO","placa":"GRP-0009","chofer":"CESAR INTRIAGO","pesoSb":4490,"pesoAsesor":3500,"fechaSalida":"2026-10-26T08:39:56-05:00","fechaGeneraSolic":"2026-10-20T13:12:12-05:00","fechaSolicitada":"2026-10-26T08:30:00-05:00","fechaGeneraRuta":"2026-10-21T07:31:37-05:00","fechaAsignada":"2026-10-26T08:30:00-05:00"},
-{"ruta":5604,"numsb":"SBG00000977","proveedor":"POGO DELGADO RAFAEL ANTONIO","fechaSB":"2026-10-27T08:20:35-05:00","placaSB":"GQF-0713","choferSB":"OMAR VELIZ","placa":"GSJ-4626","chofer":"VELIZ CALLE LUIS ENRIQUE  ","pesoSb":4600,"pesoAsesor":3500,"fechaSalida":"2026-10-26T09:39:30-05:00","fechaGeneraSolic":"2026-10-22T09:06:48-05:00","fechaSolicitada":"2026-10-26T09:00:00-05:00","fechaGeneraRuta":"2026-10-22T12:35:48-05:00","fechaAsignada":"2026-10-26T09:00:00-05:00"},
-{"ruta":5612,"numsb":"SBG00000978","proveedor":"PINCAY VILLAMAR JHONATAN XAVIER","fechaSB":"2026-10-27T08:26:44-05:00","placaSB":"KBA-1226","choferSB":"CESAR HOLGUIN","placa":"KBA-1226","chofer":"HOLGUIN ZAMBRANO CESAR ARMANDO","pesoSb":7810,"pesoAsesor":8000,"fechaSalida":"2026-10-26T14:25:26-05:00","fechaGeneraSolic":"2026-10-22T15:04:30-05:00","fechaSolicitada":"2026-10-26T09:00:00-05:00","fechaGeneraRuta":"2026-10-23T12:38:52-05:00","fechaAsignada":"2026-10-26T09:00:00-05:00"},
-{"ruta":5603,"numsb":"SBG00005491","proveedor":"MICHELENA CHAVEZ GARY","fechaSB":"2026-10-26T12:03:07-05:00","placaSB":"GSW-7452","choferSB":"CESAR BRAVO","placa":"GSW-7452","chofer":"CEDEÑO CORREA YORGE SEYINE","pesoSb":1840,"pesoAsesor":2000,"fechaSalida":"2026-10-26T09:39:09-05:00","fechaGeneraSolic":"2026-10-22T09:00:33-05:00","fechaSolicitada":"2026-10-26T09:00:00-05:00","fechaGeneraRuta":"2026-10-22T12:35:20-05:00","fechaAsignada":"2026-10-26T09:00:00-05:00"},
-{"ruta":5621,"numsb":"SBG00005501","proveedor":"MICHELENA CHAVEZ GARY","fechaSB":"2026-10-28T08:43:10-05:00","placaSB":"GSW-7452","choferSB":"LUIS VELIZ","placa":"GSW-7452","chofer":"CESAR AGUSTO BRAVO PIN","pesoSb":1760,"pesoAsesor":800,"fechaSalida":"2026-10-27T09:46:35-05:00","fechaGeneraSolic":"2026-10-26T08:42:26-05:00","fechaSolicitada":"2026-10-26T10:40:40-05:00","fechaGeneraRuta":"2026-10-26T12:16:30-05:00","fechaAsignada":"2026-10-26T10:40:40-05:00"},
-{"ruta":5582,"numsb":"SBG00000988","proveedor":"MENDOZA ORDONEZ HERNAN SIGIFREDO","fechaSB":"2026-10-28T08:34:04-05:00","placaSB":"GBP-9993","choferSB":"XAVIER HEREDIA","placa":"GBP-9993","chofer":"HEREDIA VERA WASHINGTON XAVIER","pesoSb":3210,"pesoAsesor":7500,"fechaSalida":"2026-10-26T14:24:33-05:00","fechaGeneraSolic":"2026-10-19T08:58:00-05:00","fechaSolicitada":"2026-10-26T12:00:00-05:00","fechaGeneraRuta":null,"fechaAsignada":"2026-10-26T12:00:00-05:00"},
-{"ruta":5625,"numsb":"SBG00000987","proveedor":"PINCAY VILLAMAR JHONATAN XAVIER","fechaSB":"2026-10-27T16:29:33-05:00","placaSB":"GSN-2131","choferSB":"MAIRO TRIVIÑO","placa":"GBP-7833","chofer":"BRIONES RODRIGUEZ CRISTHIAN JOSE","pesoSb":4580,"pesoAsesor":5000,"fechaSalida":"2026-10-27T11:40:13-05:00","fechaGeneraSolic":"2026-10-23T12:26:33-05:00","fechaSolicitada":"2026-10-27T08:00:00-05:00","fechaGeneraRuta":"2026-10-26T12:48:53-05:00","fechaAsignada":"2026-10-27T08:00:00-05:00"},
-{"ruta":5626,"numsb":"SBC00001335","proveedor":"JONATHAN PINCAY","fechaSB":"2026-10-27T17:20:26-05:00","placaSB":"KBA-1226","choferSB":"LOPEZ VALENCIA MARCOS ANTONIO","placa":"KBA-1226","chofer":"LOPEZ VALENCIA MARCOS ANTONIO","pesoSb":8170,"pesoAsesor":5000,"fechaSalida":"2026-10-27T11:05:01-05:00","fechaGeneraSolic":"2026-10-23T12:27:57-05:00","fechaSolicitada":"2026-10-27T08:00:00-05:00","fechaGeneraRuta":"2026-10-26T12:49:18-05:00","fechaAsignada":"2026-10-27T08:00:00-05:00"},
-{"ruta":5632,"numsb":"SBG00000985","proveedor":"YANEZ CONFORME MANUEL CATALINO","fechaSB":"2026-10-27T15:03:08-05:00","placaSB":"GQF-0713","choferSB":"VELIZ SANTILLAN OMAR RUBEN","placa":"GQF-0713","chofer":"VELIZ SANTILLAN OMAR RUBEN","pesoSb":3850,"pesoAsesor":2000,"fechaSalida":"2026-10-27T09:46:15-05:00","fechaGeneraSolic":"2026-10-26T12:29:21-05:00","fechaSolicitada":"2026-10-27T08:00:00-05:00","fechaGeneraRuta":"2026-10-26T12:55:01-05:00","fechaAsignada":"2026-10-27T08:00:00-05:00"},
-{"ruta":5629,"numsb":"SB CONSOLIDADO","proveedor":"COBRE PREMIUM","fechaSB":"2026-10-29T08:27:19-05:00","placaSB":"GBP-7833","choferSB":"CESAR HOLGUIN","placa":"GBP-7833","chofer":"HOLGUIN ZAMBRANO CESAR ARMANDO","pesoSb":5120,"pesoAsesor":3300,"fechaSalida":"2026-10-28T05:33:27-05:00","fechaGeneraSolic":"2026-10-23T14:47:25-05:00","fechaSolicitada":"2026-10-27T08:00:00-05:00","fechaGeneraRuta":"2026-10-26T12:52:42-05:00","fechaAsignada":"2026-10-27T08:00:00-05:00"},
-{"ruta":5620,"numsb":"SBC00001333","proveedor":"PRONACA","fechaSB":"2026-10-27T11:04:45-05:00","placaSB":"GBQ-1014","choferSB":"CESAR BRAVO","placa":"GBQ-1014","chofer":"CESAR BRAVO","pesoSb":4060,"pesoAsesor":500,"fechaSalida":"2026-10-27T08:42:40-05:00","fechaGeneraSolic":"2026-10-23T08:49:03-05:00","fechaSolicitada":"2026-10-27T08:30:00-05:00","fechaGeneraRuta":"2026-10-26T07:09:21-05:00","fechaAsignada":"2026-10-27T08:30:00-05:00"},
-{"ruta":5614,"numsb":"SBG00005500","proveedor":"WASHINGTON JORGE TOMALÁ CASTRO","fechaSB":"2026-10-27T18:04:11-05:00","placaSB":"GRP-0009","choferSB":"CESAR INTRIAGO","placa":"GQF-0713","chofer":"VELIZ SANTILLAN OMAR RUBEN","pesoSb":2890,"pesoAsesor":3000,"fechaSalida":"2026-10-27T14:26:25-05:00","fechaGeneraSolic":"2026-10-23T12:13:10-05:00","fechaSolicitada":"2026-10-27T08:30:00-05:00","fechaGeneraRuta":"2026-10-23T12:42:43-05:00","fechaAsignada":"2026-10-27T08:30:00-05:00"},
-{"ruta":5631,"numsb":"SB00027337","proveedor":"HEINEKEN ECUADOR S.A.","fechaSB":"2026-10-27T15:48:54-05:00","placaSB":"GBQ-1014","choferSB":"CRISTHIAN BRIONES","placa":"GSN-2131","chofer":"BRIONES RODRIGUEZ CRISTHIAN JOSE","pesoSb":1720,"pesoAsesor":2000,"fechaSalida":"2026-10-27T14:57:54-05:00","fechaGeneraSolic":"2026-10-26T09:01:02-05:00","fechaSolicitada":"2026-10-27T09:00:38-05:00","fechaGeneraRuta":"2026-10-26T12:54:25-05:00","fechaAsignada":"2026-10-27T09:00:38-05:00"},
-{"ruta":5639,"numsb":"SBG00005507","proveedor":"VERGARA PICO JEFFERSON JOEL","fechaSB":"2026-10-29T08:17:27-05:00","placaSB":"GSN-2131","choferSB":"MAIRO TRIVIÑO","placa":"GSN-2131","chofer":"TRIVIÑO MONTECE MAIRO AGUSTIN","pesoSb":3740,"pesoAsesor":6000,"fechaSalida":"2026-10-28T05:33:13-05:00","fechaGeneraSolic":"2026-10-26T09:03:09-05:00","fechaSolicitada":"2026-10-28T08:00:00-05:00","fechaGeneraRuta":"2026-10-27T11:08:10-05:00","fechaAsignada":"2026-10-28T08:00:00-05:00"},
-{"ruta":5644,"numsb":"SBG00000991","proveedor":"YANEZ CONFORME MANUEL CATALINO","fechaSB":"2026-10-28T13:10:19-05:00","placaSB":"GSW-7452","choferSB":"LUIS VELIZ","placa":"GRP-0009","chofer":"INTRIAGO LOOR CESAR HERNAN","pesoSb":1070,"pesoAsesor":2200,"fechaSalida":"2026-10-28T10:04:45-05:00","fechaGeneraSolic":"2026-10-26T12:30:34-05:00","fechaSolicitada":"2026-10-28T08:00:00-05:00","fechaGeneraRuta":"2026-10-27T11:11:18-05:00","fechaAsignada":"2026-10-28T08:00:00-05:00"},
-{"ruta":5637,"numsb":"SBG00000995","proveedor":"DELGADO CRISTOBAL","fechaSB":"2026-10-29T09:46:14-05:00","placaSB":"GBP-2969","choferSB":"YORGE CEDEÑO","placa":"GBP-2969","chofer":"CEDEÑO CORREA YORGE SEYINE","pesoSb":27890,"pesoAsesor":5000,"fechaSalida":"2026-10-28T05:32:58-05:00","fechaGeneraSolic":"2026-10-26T05:48:28-05:00","fechaSolicitada":"2026-10-28T08:00:00-05:00","fechaGeneraRuta":null,"fechaAsignada":"2026-10-28T08:00:00-05:00"},
-{"ruta":5636,"numsb":"SBG00000994","proveedor":"HERRERA AGUIRRE MANUEL DE JESUS","fechaSB":"2026-10-29T08:37:02-05:00","placaSB":"NBA-1190","choferSB":"CRISTHIAN BRIONES","placa":"NBA-1190","chofer":"LOPEZ VALENCIA MARCOS ANTONIO  ","pesoSb":11130,"pesoAsesor":4900,"fechaSalida":"2026-10-28T05:32:41-05:00","fechaGeneraSolic":"2026-10-26T05:46:53-05:00","fechaSolicitada":"2026-10-28T08:00:00-05:00","fechaGeneraRuta":null,"fechaAsignada":"2026-10-28T08:00:00-05:00"},
-{"ruta":5628,"numsb":"SBG00000993","proveedor":"PINCAY VILLAMAR JHONATAN XAVIER","fechaSB":"2026-10-28T16:54:48-05:00","placaSB":"GBP-9993","choferSB":"XAVIER HEREDIA","placa":"KBA-1226","chofer":"HOLGUIN ZAMBRANO CESAR ARMANDO","pesoSb":3600,"pesoAsesor":5000,"fechaSalida":"2026-10-28T15:28:48-05:00","fechaGeneraSolic":"2026-10-23T12:32:47-05:00","fechaSolicitada":"2026-10-28T08:00:00-05:00","fechaGeneraRuta":"2026-10-26T12:50:37-05:00","fechaAsignada":"2026-10-28T08:00:00-05:00"},
-{"ruta":5633,"numsb":"SBG00005505","proveedor":"RECIFERRO S.A.","fechaSB":"2026-10-28T16:19:14-05:00","placaSB":"GQF-0713","choferSB":"OMAR VELIZ","placa":"GQF-0713","chofer":"VELIZ SANTILLAN OMAR RUBEN","pesoSb":1320,"pesoAsesor":2500,"fechaSalida":"2026-10-28T05:33:43-05:00","fechaGeneraSolic":"2026-10-26T05:44:26-05:00","fechaSolicitada":"2026-10-28T08:00:00-05:00","fechaGeneraRuta":"2026-10-26T12:55:55-05:00","fechaAsignada":"2026-10-28T08:00:00-05:00"},
-{"ruta":5649,"numsb":"SBG00005508","proveedor":"MICHELENA CHAVEZ GARY","fechaSB":"2026-10-29T08:20:01-05:00","placaSB":"GSW-7452","choferSB":"LUIS VELIZ","placa":"GRP-0009","chofer":"INTRIAGO LOOR CESAR HERNAN","pesoSb":2880,"pesoAsesor":1800,"fechaSalida":"2026-10-28T15:29:02-05:00","fechaGeneraSolic":"2026-10-27T12:03:15-05:00","fechaSolicitada":"2026-10-28T08:30:00-05:00","fechaGeneraRuta":"2026-10-27T12:20:28-05:00","fechaAsignada":"2026-10-28T08:30:00-05:00"},
-{"ruta":5642,"numsb":"SBG00000992","proveedor":"BENAVIDES CASTILLO FABIO LEONARDO","fechaSB":"2026-10-28T16:13:38-05:00","placaSB":"GRP-0009","choferSB":"CESAR INTRIAGO","placa":"GQF-0713","chofer":"VELIZ SANTILLAN OMAR RUBEN","pesoSb":4700,"pesoAsesor":4000,"fechaSalida":"2026-10-28T09:50:49-05:00","fechaGeneraSolic":"2026-10-26T09:25:46-05:00","fechaSolicitada":"2026-10-28T09:00:00-05:00","fechaGeneraRuta":null,"fechaAsignada":"2026-10-28T09:00:00-05:00"},
-{"ruta":5638,"numsb":"SB00027339","proveedor":"HEINEKEN ECUADOR S.A.","fechaSB":"2026-10-28T10:15:48-05:00","placaSB":"GBQ-1014","choferSB":"CESAR BRAVO","placa":"GBQ-1014","chofer":"BRIONES RODRIGUEZ CRISTHIAN JOSE","pesoSb":320,"pesoAsesor":2000,"fechaSalida":"2026-10-28T09:07:15-05:00","fechaGeneraSolic":"2026-10-26T09:02:48-05:00","fechaSolicitada":"2026-10-28T09:01:10-05:00","fechaGeneraRuta":"2026-10-27T11:07:43-05:00","fechaAsignada":"2026-10-28T09:01:10-05:00"},
-{"ruta":5630,"numsb":"SB00027341","proveedor":"HEINEKEN ECUADOR S.A.","fechaSB":"2026-10-28T12:40:24-05:00","placaSB":"GBQ-1014","choferSB":"CESAR BRAVO","placa":"GSW-7452","chofer":"BRIONES RODRIGUEZ CRISTHIAN JOSE","pesoSb":650,"pesoAsesor":2000,"fechaSalida":"2026-10-28T10:54:16-05:00","fechaGeneraSolic":"2026-10-26T08:31:53-05:00","fechaSolicitada":"2026-10-26T10:30:18-05:00","fechaGeneraRuta":"2026-10-26T12:54:04-05:00","fechaAsignada":"2026-10-28T10:30:18-05:00"},
-{"ruta":5648,"numsb":"SB00027342","proveedor":"TRANSARC S.A.","fechaSB":"2026-10-28T16:11:04-05:00","placaSB":"GBQ-1014","choferSB":"CESAR BRAVO","placa":"GSW-7452","chofer":"CEDEÑO CORREA YORGE SEYINE","pesoSb":1720,"pesoAsesor":2000,"fechaSalida":"2026-10-28T15:28:33-05:00","fechaGeneraSolic":"2026-10-26T13:14:27-05:00","fechaSolicitada":"2026-10-28T15:12:57-05:00","fechaGeneraRuta":"2026-10-27T11:14:59-05:00","fechaAsignada":"2026-10-28T15:12:57-05:00"},
-{"ruta":5646,"numsb":"SBG00001000","proveedor":"YANEZ CONFORME MANUEL CATALINO","fechaSB":"2026-10-29T12:20:16-05:00","placaSB":"GRP-0009","choferSB":"CESAR INTRIAGO","placa":"GSW-7452","chofer":"CEDEÑO CORREA YORGE SEYINE","pesoSb":890,"pesoAsesor":1000,"fechaSalida":null,"fechaGeneraSolic":"2026-10-26T12:31:40-05:00","fechaSolicitada":"2026-10-29T08:00:00-05:00","fechaGeneraRuta":"2026-10-27T11:13:49-05:00","fechaAsignada":"2026-10-29T08:00:00-05:00"},
-{"ruta":5622,"numsb":"SBC00001339","proveedor":"PRONACA","fechaSB":"2026-10-29T10:41:00-05:00","placaSB":"GBQ-1014","choferSB":"CESAR BRAVO","placa":"GBQ-1014","chofer":"CESAR BRAVO","pesoSb":0,"pesoAsesor":500,"fechaSalida":null,"fechaGeneraSolic":"2026-10-23T08:49:46-05:00","fechaSolicitada":"2026-10-29T08:30:00-05:00","fechaGeneraRuta":"2026-10-26T12:29:52-05:00","fechaAsignada":"2026-10-29T08:30:00-05:00"}
-];
-const seedHist=()=>Object.fromEntries(HIST.map(h=>['h'+h.ruta,Object.fromEntries(Object.entries(h).map(([k,v])=>[k,k.startsWith('fecha')&&v?{__ts:Date.parse(v)}:v]))]));
-let DB; try{ DB=JSON.parse(localStorage.getItem(KEY)); }catch{} DB=DB||demo();
-if(!DB.history){ DB.history=seedHist(); localStorage.setItem(KEY,JSON.stringify(DB)); }   // carga el histórico real una sola vez
-const persist=()=>{ localStorage.setItem(KEY,JSON.stringify(DB)); subs.forEach(f=>f()); };
-addEventListener('storage',e=>{ if(e.key===KEY&&e.newValue){ DB=JSON.parse(e.newValue); subs.forEach(f=>f()); } }); // sincroniza pestañas
-const db={}, initializeApp=()=>({}), initializeFirestore=()=>db;
-const collection=(_,n)=>({n}), doc=(_,n,id)=>({n,id}), where=(f,op,v)=>({f,op,v}), query=(c,...w)=>({n:c.n,w});
-const run=q=>Object.entries(DB[q.n]||{}).map(([id,v])=>({id,data:()=>rd(v)})).filter(d=>(q.w||[]).every(({f,op,v})=>{
-  const x=d.data()[f], a=x instanceof TS?+x:x, b=v instanceof TS?+v:v; return op==='=='?a===b:op==='>='?a>=b:a<=b; }));
-const snapOf=q=>{ const docs=run(q); return {docs,empty:!docs.length,size:docs.length}; };
-const getDocs=async q=>snapOf(q);
-const getDoc=async r=>{ const v=(DB[r.n]||{})[r.id]; return {id:r.id,exists:()=>!!v,data:()=>v&&rd(v)}; };
-const addDoc=async(c,data)=>{ const id='x'+Math.random().toString(36).slice(2,10); (DB[c.n]??={})[id]=enc(data); persist(); return {id}; };
-const setDoc=async(r,data)=>{ DB[r.n][r.id]=enc(data); persist(); };
-const updateDoc=async(r,data)=>{ const o=DB[r.n][r.id];
-  for(const [k,v] of Object.entries(data)){ const p=k.split('.'); let t=o; p.slice(0,-1).forEach(x=>t=t[x]??={}); t[p.at(-1)]=enc(v); } persist(); };
-const deleteDoc=async r=>{ delete DB[r.n][r.id]; persist(); };
-const onSnapshot=(q,cb)=>{ const f=()=>cb(snapOf(q)); subs.add(f); f(); return ()=>subs.delete(f); };
 const col = n => collection(db, n);
 
 /* ============ 2. UTILIDADES ============ */
@@ -177,10 +68,10 @@ const clean = () => { unsubs.forEach(u => u()); unsubs = []; };
 /* Datos iniciales: admin/1234 y estados por defecto (solo si están vacíos) */
 async function seed() {
   if ((await getDocs(col('users'))).empty)
-    await addDoc(col('users'), {username:'admin', pin:'1234', role:'admin'});
+    await setDoc(doc(db, 'users', 'admin'), {username:'admin', pin:'1234', role:'admin'});
   if ((await getDocs(col('statuses'))).empty)
     for (const [i,[n,a,o]] of STATUS_DEFAULTS.entries())
-      await addDoc(col('statuses'), {name:n, order:i+1, askLoad:!!a, askNotes:!!o});   // askLoad: pide % de carga · askNotes: pide novedades
+      await setDoc(doc(db, 'statuses', 's' + (i+1)), {name:n, order:i+1, askLoad:!!a, askNotes:!!o});   // askLoad: pide % de carga · askNotes: pide novedades
 }
 
 /* ============ 3. LOGIN ============ */
@@ -191,15 +82,13 @@ function loginView() {
     <form id="f" class="w-full max-w-sm bg-white rounded-2xl shadow-lg p-6 space-y-4 border-t-4 border-eco-500">
       <img src="${LOGO_F}" alt="Ecoresa Group · Soluciones para la vida" class="w-60 mx-auto">
       <h1 class="text-2xl font-bold text-resa-700 text-center">Control de camiones</h1>
-      <p class="text-sm bg-eco-50 border border-eco-200 rounded-lg p-3">Versión de demostración. Admin: <b>admin / 1234</b> · Chofer: <b>chofer1 / 1111</b>. Ruta de prueba para iniciar: 5656. Las rutas 5650, 5651 y 5652 quedan bloqueadas porque su camión ya está en otra ruta en curso.</p>
+      <p class="text-sm bg-eco-50 border border-eco-200 rounded-lg p-3">Acceso inicial: <b>admin / 1234</b>. Los choferes los creas en la pestaña <b>Usuarios</b>.</p>
       <input id="u" class="${INP}" placeholder="Nombre de usuario" autocomplete="username" required>
       <input id="p" class="${INP}" placeholder="PIN" type="password" inputmode="numeric" required>
       <p id="err" class="text-red-600 text-sm"></p>
       <button class="${B} w-full bg-resa-600 text-white hover:bg-resa-700">Ingresar</button>
-      <button type="button" id="rst" class="text-xs underline text-stone-500 w-full">Restablecer datos de demo</button>
     </form>
   </main>`;
-  $('#rst').onclick = () => { localStorage.removeItem(KEY); localStorage.removeItem('sess'); location.reload(); };
   $('#f').onsubmit = async e => {
     e.preventDefault();
     $('#err').textContent = 'Conectando…';
@@ -888,7 +777,7 @@ function parseExcel(buf) {
     if (!Number.isFinite(ms)) { errs.push(`Fila ${rn}: fecha no válida en "${raw[0][col[k]]}" (${v}).`); return null; }
     return ms;
   };
-  const T0 = ms => ms == null ? null : {__ts: ms};
+  const T0 = ms => ms == null ? null : Timestamp.fromMillis(ms);
   const timeOf = v => {   // hora del día en ms: fracción de día de Excel o texto "8:30", "08:30:00", "8:30 a. m."
     if (typeof v === 'number') return Math.round((v % 1) * 86400) * 1000;
     const m = String(v).toLowerCase().replace(/[.\s]/g, '').match(/^(\d{1,2}):(\d\d)(?::(\d\d))?(am|pm)?$/);
@@ -959,10 +848,18 @@ function parseExcel(buf) {
   return {routes, trips, history, trucks, errs};
 }
 
-function applyImport(P) {
-  DB = {users: DB.users || {}, statuses: DB.statuses || {}, trucks: P.trucks, routes: P.routes, trips: P.trips, history: P.history, requests: {}};
-  Object.keys(localStorage).filter(k => k.startsWith('trip_')).forEach(k => localStorage.removeItem(k));   // viajes en curso de choferes: ya no existen
-  persist();
+async function applyImport(P) {
+  /* Reemplaza en Firestore: trucks, routes, trips, history y requests. users y statuses se conservan. */
+  const COLS = {trucks: P.trucks, routes: P.routes, trips: P.trips, history: P.history, requests: {}};
+  const ops = [];
+  for (const c of Object.keys(COLS)) {
+    (await getDocs(col(c))).docs.forEach(d => ops.push(b => b.delete(d.ref)));        // borra lo anterior
+    Object.entries(COLS[c]).forEach(([id, data]) => ops.push(b => b.set(doc(db, c, id), data)));   // escribe lo nuevo
+  }
+  for (let k = 0; k < ops.length; k += 400) {                                          // lotes (máx. 500 por batch)
+    const b = writeBatch(db); ops.slice(k, k + 400).forEach(f => f(b)); await b.commit();
+  }
+  Object.keys(localStorage).filter(k => k.startsWith('trip_')).forEach(k => localStorage.removeItem(k));   // viajes en curso de este dispositivo
 }
 
 function importView() {
@@ -990,7 +887,8 @@ function importView() {
       const nR = Object.keys(P.routes).length, nT = Object.keys(P.trips).length, nH = Object.keys(P.history).length, nP = Object.keys(P.trucks).length;
       if (!confirm(`Se reemplazará TODA la información actual por la del Excel:\n\n• ${nR} rutas\n• ${nT} viajes del chofer\n• ${nH} registros de báscula\n• ${nP} placas\n\nLas solicitudes pendientes se vaciarán. ¿Continuar?`))
         return box('bg-stone-50 border-stone-200 text-stone-600', 'Importación cancelada. No se cambió nada.');
-      applyImport(P);
+      box('bg-stone-50 border-stone-200 text-stone-600', 'Guardando en la nube… no cierres la página.');
+      await applyImport(P);
       box('bg-eco-50 border-eco-300 text-eco-800', `<b>Importación completa.</b> ${nR} rutas · ${nT} viajes · ${nH} registros de báscula · ${nP} placas.
         <div class="mt-2 flex gap-2 flex-wrap">${[['dash', 'Ver Flota estado'], ['cal', 'Ver Calendario'], ['report', 'Ver Informe por ruta']].map(([k, t]) =>
           `<button data-go="${k}" class="${B} bg-resa-600 text-white hover:bg-resa-700 !py-2">${t}</button>`).join('')}</div>`);
